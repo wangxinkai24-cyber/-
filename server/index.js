@@ -34,12 +34,13 @@ function newCode() {
 }
 function send(ws, obj) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(obj)); }
 function lobbyMsg(room, seat) {
-  return { t: 'lobby', code: room.code, host: 0, you: seat, settings: room.settings, started: !!room.game,
-    seats: room.seats.map(s => ({ name: s.name, connected: !!(s.ws && s.ws.readyState === 1) })) };
+  return { t: 'lobby', code: room.code, host: room.host, you: seat, settings: room.settings, started: !!room.game,
+    seats: room.seats.map(s => ({ name: s.name, left: !!s.left, connected: !!(s.ws && s.ws.readyState === 1) })) };
 }
 function broadcast(room) {
   room.touched = Date.now();
   room.seats.forEach((s, i) => {
+    if (s.left) return;
     send(s.ws, lobbyMsg(room, i));
     if (room.game) {
       const st = room.game.view(i);
@@ -66,7 +67,7 @@ wss.on('connection', ws => {
 function onMessage(ws, m) {
   const name = String(m.name || '').trim().slice(0, 12) || '玩家';
   if (m.t === 'create') {
-    const room = { code: newCode(), seats: [], settings: { side: 'moon', empVariant: 'starter' }, game: null, touched: Date.now() };
+    const room = { code: newCode(), host: 0, seats: [], settings: { side: 'moon', empVariant: 'starter' }, game: null, touched: Date.now() };
     rooms.set(room.code, room);
     return seat(ws, room, name);
   }
@@ -80,7 +81,7 @@ function onMessage(ws, m) {
   if (m.t === 'rejoin') {
     const room = rooms.get(String(m.code || '').toUpperCase());
     if (!room) return send(ws, { t: 'gone' });
-    const i = room.seats.findIndex(s => s.token === m.token);
+    const i = room.seats.findIndex(s => s.token === m.token && !s.left);
     if (i < 0) return send(ws, { t: 'gone' });
     room.seats[i].ws = ws; ws.room = room; ws.seat = i;
     send(ws, { t: 'joined', code: room.code, token: m.token, seat: i });
@@ -89,29 +90,47 @@ function onMessage(ws, m) {
   const room = ws.room; if (!room) return send(ws, { t: 'err', msg: '你不在房间中' });
   const si = ws.seat;
   if (m.t === 'settings') {
-    if (si !== 0 || room.game) return;
+    if (si !== room.host || room.game) return;
     if (['moon', 'sun'].includes(m.side)) room.settings.side = m.side;
     if (['starter', 'random'].includes(m.empVariant)) room.settings.empVariant = m.empVariant;
     return broadcast(room);
   }
   if (m.t === 'leave') {
-    if (room.game) return;
-    room.seats.splice(si, 1);
-    room.seats.forEach((s, i) => { if (s.ws) s.ws.seat = i; });
     ws.room = null;
-    send(ws, { t: 'left' });
-    if (!room.seats.length) rooms.delete(room.code); else broadcast(room);
+    if (!room.game) {
+      // 大厅中离开：直接移除座位，房主顺延给下一位
+      room.seats.splice(si, 1);
+      room.seats.forEach((s, i) => { if (s.ws) s.ws.seat = i; });
+      if (si < room.host) room.host--;
+      else if (si === room.host && room.host >= room.seats.length) room.host = 0; // 下一位（顺延到该座位）继承房主
+      send(ws, { t: 'left' });
+      if (!room.seats.length) rooms.delete(room.code); else broadcast(room);
+      return;
+    }
+    const g = room.game;
+    const wasEnded = g.phase === 'ended';
+    if (!wasEnded) g.leave(si);
+    room.seats[si].left = true; room.seats[si].ws = null;
+    passHost(room, si);
+    const result = g.phase === 'ended' ? g.ranking.map(i => ({ name: g.players[i].name, score: g.players[i].score, left: g.players[i].left })) : null;
+    send(ws, { t: 'left', score: g.players[si].score, result: !wasEnded && result && room.seats.every(s => s.left) ? result : null });
+    if (room.seats.every(s => s.left)) rooms.delete(room.code); else broadcast(room);
     return;
   }
   if (m.t === 'start') {
-    if (si !== 0) return send(ws, { t: 'err', msg: '只有房主可以开始游戏' });
+    if (si !== room.host) return send(ws, { t: 'err', msg: '只有房主可以开始游戏' });
     if (room.game) return;
     if (room.seats.length < 2) return send(ws, { t: 'err', msg: '至少需要2名玩家' });
     room.game = new Game(room.seats.map(s => ({ name: s.name })), room.settings);
     return broadcast(room);
   }
   if (m.t === 'restart') {
-    if (si !== 0) return;
+    if (si !== room.host) return;
+    // 去掉已离开的座位，回到大厅
+    const hostTok = room.seats[room.host].token;
+    room.seats = room.seats.filter(s => !s.left);
+    room.seats.forEach((s, i) => { if (s.ws) s.ws.seat = i; });
+    room.host = Math.max(0, room.seats.findIndex(s => s.token === hostTok));
     room.game = null; return broadcast(room);
   }
   if (m.t === 'act') {
@@ -119,6 +138,13 @@ function onMessage(ws, m) {
     room.game.handle(si, m.msg || {});
     return broadcast(room);
   }
+}
+
+// 房主离开时，按座位顺序由下一位未离开的玩家继承
+function passHost(room, si) {
+  if (room.host !== si) return;
+  const n = room.seats.length;
+  for (let k = 1; k <= n; k++) { const j = (si + k) % n; if (!room.seats[j].left) { room.host = j; return; } }
 }
 
 function seat(ws, room, name) {

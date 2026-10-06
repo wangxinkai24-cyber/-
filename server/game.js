@@ -69,7 +69,7 @@ class Game {
         rooms: [0, 1, 2, 3].map(() => [null, null, null, null, null]),
         hand: [], played: [], politics: [],
         tile: null, covered: [false, false],
-        pending: [], final: null,
+        pending: [], final: null, left: false, leftScore: null,
       };
     });
     const T = D.TURN_TILES[n];
@@ -314,7 +314,7 @@ class Game {
     this.rollDice(this.totalDice);
     this.trash = 0;
     this.waiting = new Set();
-    for (const p of this.players) { p.covered = [false, false]; for (const e of p.played) e.used = false; }
+    for (const p of this.players) { p.covered = p.left ? [true, true] : [false, false]; for (const e of p.played) e.used = false; }
     this.log(`—— 第 ${this.round} 轮开始，骰子：${[1, 2, 3, 4, 5, 6].map(v => `${v}×${this.dice[v]}`).join(' ')} ——`);
     this.nextTurn();
   }
@@ -362,6 +362,7 @@ class Game {
     const back = D.ROYAL_BACK[this.round];
     this.log(`—— 第 ${this.round} 轮结束：皇室计分（板块 ${tile}，倒退${back}格）——`);
     for (const p of this.players) {
+      if (p.left) continue;
       const pts = D.ROYAL_PTS[p.royal];
       this.addPts(p, pts);
       p.royal = Math.max(0, p.royal - back);
@@ -451,6 +452,7 @@ class Game {
     const endIds = new Set();
     for (const p of this.players) for (const e of p.played) if (EMP_BY_ID[e.id].type === 'end' && e.id !== 29) endIds.add(e.id);
     for (const p of this.players) {
+      if (p.left) { p.score = p.leftScore; p.final = { left: true, start: p.leftScore, emp: 0, empDetail: [], rooms: 0, money: 0, food: 0, cafe: 0, total: p.leftScore, tie: -1 }; continue; }
       const b = { start: p.score };
       const empPts = id => this.endEmpPoints(p, id);
       let emp = 0; const detail = [];
@@ -502,6 +504,7 @@ class Game {
   _handle(pi, msg) {
     const p = this.players[pi];
     if (!p) fail('无效玩家');
+    if (p.left) fail('你已离开本局游戏');
     if (this.phase === 'ended') fail('游戏已结束');
     const t = msg.type;
     if (t === 'pend') { this.resolvePending(pi, msg); }
@@ -513,12 +516,7 @@ class Game {
       p.cafe[p.cafe.indexOf(null)] = { id, filled: [] };
       this.log(`${p.name} 选择了起始宾客【${GUEST_BY_ID[id].name}】`);
       this.setupIdx++;
-      if (this.setupIdx >= this.n) {
-        this.phase = 'setupRooms';
-        this.turn = null;
-        for (const q of this.players) q.pending.push({ k: 'rooms', n: 3, d: 0, placed: 0, setup: true });
-        this.log('请所有玩家准备最多3间客房（从左下角开始），完成后点击“完成”');
-      } else this.turn = { p: this.setupOrder[this.setupIdx] };
+      this.advanceSetup();
     }
     else if (this.phase === 'play') {
       if (!this.turn || this.turn.p !== pi) fail('还没轮到你');
@@ -778,6 +776,37 @@ class Game {
   }
   afterPending() { this.checkRoyalDone(); this.checkSetupRoomsDone(); }
 
+  advanceSetup() {
+    while (this.setupIdx < this.n && this.players[this.setupOrder[this.setupIdx]].left) this.setupIdx++;
+    if (this.setupIdx >= this.n) {
+      this.phase = 'setupRooms';
+      this.turn = null;
+      for (const q of this.players) if (!q.left) q.pending.push({ k: 'rooms', n: 3, d: 0, placed: 0, setup: true });
+      this.log('请所有玩家准备最多3间客房（从左下角开始），完成后点击“完成”');
+      this.checkSetupRoomsDone();
+    } else this.turn = { p: this.setupOrder[this.setupIdx] };
+  }
+
+  // 玩家中途离开：以离开时的分数作为最终分数
+  leave(pi) {
+    const p = this.players[pi];
+    if (!p || p.left || this.phase === 'ended') return;
+    const snap = structuredClone(Object.assign({}, this));
+    try {
+      p.left = true; p.leftScore = p.score;
+      if (p.pending.some(t => t.k === 'd3p' && t.cards)) for (const t of p.pending) if (t.k === 'd3p' && t.cards) this.empDeck.push(...t.cards);
+      p.pending = []; p.covered = [true, true];
+      this.waiting.delete(pi);
+      this.log(`${p.name} 离开了游戏，最终分数按离开时的 ${p.score} 分计算`);
+      if (this.players.every(q => q.left)) { this.log('所有玩家都已离开，游戏立即结算'); this.finishGame(); }
+      else if (this.phase === 'setupGuests') { if (this.turn && this.turn.p === pi) this.advanceSetup(); }
+      else if (this.phase === 'setupRooms') this.checkSetupRoomsDone();
+      else if (this.phase === 'royal') this.checkRoyalDone();
+      else if (this.phase === 'play' && this.turn && this.turn.p === pi) this.nextTurn();
+    } catch (e) { for (const k of Object.keys(this)) delete this[k]; Object.assign(this, snap); throw e; }
+    this.version++;
+  }
+
   // ---------- 视图 ----------
   view(pi) {
     const me = pi;
@@ -798,7 +827,7 @@ class Game {
         hand: i === me ? p.hand : null, handCount: p.hand.length,
         pending: i === me ? p.pending : p.pending.map(t => ({ k: t.k })),
         politicsOk: i === me ? Object.fromEntries(this.politics.map(c => [c.id, this.politicsOk(p, c.id)])) : null,
-        final: p.final,
+        final: p.final, left: p.left,
       })),
       log: this.logs.slice(-80),
     };

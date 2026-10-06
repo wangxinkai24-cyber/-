@@ -30,7 +30,11 @@ function connect() {
     const m = JSON.parse(ev.data);
     if (m.t === 'joined') { session = { code: m.code, token: m.token }; save(session); }
     else if (m.t === 'gone') { session = null; save(null); lobby = null; S = null; }
-    else if (m.t === 'left') { session = null; save(null); lobby = null; S = null; }
+    else if (m.t === 'left') {
+      session = null; save(null); lobby = null; S = null;
+      if (m.result) ui.leftResult = m.result;
+      else if (m.score != null) toast(`你已离开游戏，最终成绩按 ${m.score} 分计算`);
+    }
     else if (m.t === 'lobby') { lobby = m; if (!m.started) S = null; }
     else if (m.t === 'state') { onState(m.state); }
     else if (m.t === 'err') toast(m.msg);
@@ -136,7 +140,11 @@ function render() {
 }
 
 function renderHome() {
-  return `<div class="lobby"><div class="panel">
+  const R = ui.leftResult;
+  const res = R ? `<div class="modal"><div class="box final"><h2>🏁 所有玩家已离开，游戏结算</h2>
+    <table><tr><th>名次</th><th>玩家</th><th>最终分数</th></tr>${R.map((r, k) => `<tr class="${k === 0 ? 'win' : ''}"><td>${k + 1}</td><td>${esc(r.name)}</td><td><b>${r.score}</b></td></tr>`).join('')}</table>
+    <p class="small">每位玩家按离开时的分数计算。</p><div class="row" style="justify-content:flex-end"><button data-a="closeResult">关闭</button></div></div></div>` : '';
+  return res + `<div class="lobby"><div class="panel">
     <h1>奥地利大饭店</h1><div class="sub">2–4 人联机 · 维也纳 1900</div>
     <div class="row"><input id="nm" placeholder="你的名字" maxlength="12" value="${esc(savedName())}"></div>
     <div class="row"><button class="gold" data-a="create">创建房间</button></div>
@@ -145,12 +153,12 @@ function renderHome() {
   </div></div>`;
 }
 function renderLobby() {
-  const L = lobby, host = L.you === 0;
+  const L = lobby, host = L.you === L.host;
   return `<div class="lobby"><div class="panel">
     <h1>等待玩家</h1>
     <div class="sub">把房间号告诉朋友</div>
     <div class="code">${L.code}</div>
-    <ul class="seatlist">${L.seats.map((s, i) => `<li>${dot(G.PLAYER_COLORS[i])}<b>${esc(s.name)}</b>${i === 0 ? '<span class="small">房主</span>' : ''}${i === L.you ? '<span class="small">（你）</span>' : ''}<span style="margin-left:auto" class="small">${s.connected ? '在线' : '离线'}</span></li>`).join('')}
+    <ul class="seatlist">${L.seats.map((s, i) => `<li>${dot(G.PLAYER_COLORS[i])}<b>${esc(s.name)}</b>${i === L.host ? '<span class="small">房主</span>' : ''}${i === L.you ? '<span class="small">（你）</span>' : ''}<span style="margin-left:auto" class="small">${s.connected ? '在线' : '离线'}</span></li>`).join('')}
     ${Array.from({ length: 4 - L.seats.length }, () => '<li class="small">空座位</li>').join('')}</ul>
     <div class="row"><label style="flex:0 0 90px;align-self:center">酒店版图</label>
       <select data-set="side" ${host ? '' : 'disabled'}><option value="moon" ${L.settings.side === 'moon' ? 'selected' : ''}>月亮面（所有人相同，推荐首局）</option><option value="sun" ${L.settings.side === 'sun' ? 'selected' : ''}>太阳面（A/B/C/D 各不相同）</option></select></div>
@@ -183,6 +191,7 @@ function renderGame() {
     <span class="pill">💶 ${me.money}</span><span class="pill">👑 ${me.royal}</span><span class="pill">⭐ ${me.score}</span>
     ${connected ? '' : '<span class="pill" style="background:#7d1f2c">重连中…</span>'}
     <button class="ghost" style="color:#f2e6c9;border-color:#c39a3c;padding:3px 10px" data-a="rules">规则速查</button>
+    <button class="ghost" style="color:#f2b8b8;border-color:#a8505b;padding:3px 10px" data-a="leaveGame">离开游戏</button>
   </div>
   <div class="wrap">
     <div class="col">
@@ -205,7 +214,7 @@ function renderPrompt() {
   const me = S.players[S.me], t = me.pending[0], T = S.turn;
   const myTurn = S.phase === 'play' && T && T.p === S.me;
   let msg = '', btns = '';
-  if (S.phase === 'ended') { msg = '游戏结束！'; btns = `<button class="gold" data-a="final">查看最终计分</button>${lobby.you === 0 ? '<button class="ghost" data-a="restart">返回房间再来一局</button>' : ''}`; }
+  if (S.phase === 'ended') { msg = '游戏结束！'; btns = `<button class="gold" data-a="final">查看最终计分</button>${lobby.you === lobby.host ? '<button class="ghost" data-a="restart">返回房间再来一局</button>' : ''}`; }
   else if (t) {
     switch (t.k) {
       case 'rooms': msg = (t.label || (t.setup ? '准备阶段' : '准备客房')) + `：点击酒店中闪烁的格子放置客房（已放 ${t.placed}/${t.n}${t.occupy ? '，放置后立即入住' : ''}${t.maxFloor != null ? `，仅限1-${t.maxFloor + 1}层` : ''}）`; btns = `<button data-p="done">${t.placed ? '完成' : '不放置 / 完成'}</button>`; break;
@@ -271,9 +280,9 @@ function renderPlayers() {
     return `<div class="${k >= 3 ? 'y' : ''}"><b>${k}</b><span class="pp">${G.ROYAL_PTS[k]}分</span><span class="mk">${mk}</span></div>`;
   }).join('');
   return `<div class="panel"><h3>玩家 <span class="r">点击玩家查看其酒店</span></h3><div class="plist">
-    ${order.map(i => { const p = S.players[i]; const on = S.connected ? S.connected[i] : true;
+    ${order.map(i => { const p = S.players[i]; const on = !p.left && (S.connected ? S.connected[i] : true);
       return `<div class="prow ${T && T.p === i ? 'active' : ''} ${ui.view === i ? 'viewing' : ''} ${on ? '' : 'off'}" data-a="view" data-i="${i}">
-        ${dot(p.color)}<span class="nm">${esc(p.name)}${i === S.me ? '（你）' : ''}${S.waiting.includes(i) ? ' ⏸' : ''}</span>
+        ${dot(p.color)}<span class="nm">${esc(p.name)}${i === S.me ? '（你）' : ''}${S.waiting.includes(i) ? ' ⏸' : ''}${p.left ? '（已离开）' : ''}${lobby.host === i ? ' 👑房主' : ''}</span>
         <span class="tiles">${p.tile.map((n, k) => `<span class="${p.covered[k] ? 'cv' : ''}">${n}</span>`).join('')}</span>
         <span class="st">⭐<b>${p.score}</b></span><span class="st">💶<b>${p.money}</b></span><span class="st">👑<b>${p.royal}</b> 🂠${p.handCount}</span></div>`; }).join('')}
   </div>
@@ -437,11 +446,11 @@ function initModal(t, me) {
 }
 function renderFinal() {
   const rows = S.ranking.map((i, k) => { const p = S.players[i], f = p.final;
-    return `<tr class="${k === 0 ? 'win' : ''}"><td>${k + 1}</td><td>${dot(p.color)} ${esc(p.name)}</td><td>${f.start}</td><td title="${esc(f.empDetail.join('，'))}">${f.emp}</td><td>${f.rooms}</td><td>${f.money}</td><td>${f.food}</td><td>${f.cafe}</td><td><b>${f.total}</b></td></tr>`; }).join('');
+    return `<tr class="${k === 0 ? 'win' : ''}"><td>${k + 1}</td><td>${dot(p.color)} ${esc(p.name)}</td>${f.left ? '<td colspan="6" class="small">中途离开，按离开时分数计算</td>' : `<td>${f.start}</td><td title="${esc(f.empDetail.join('，'))}">${f.emp}</td><td>${f.rooms}</td><td>${f.money}</td><td>${f.food}</td><td>${f.cafe}</td>`}<td><b>${f.total}</b></td></tr>`; }).join('');
   return `<div class="modal"><div class="box final" style="max-width:720px"><h2>🏆 最终计分 · ${esc(S.players[S.ranking[0]].name)} 获胜！</h2>
     <table><tr><th>名次</th><th>玩家</th><th>游戏中</th><th>员工</th><th>入住客房</th><th>克朗</th><th>厨房餐点</th><th>咖啡厅</th><th>总分</th></tr>${rows}</table>
     <p class="small">平分时，剩余餐点与克朗总数多者获胜。鼠标悬停“员工”可查看明细。</p>
-    <div class="row" style="justify-content:flex-end"><button class="ghost" data-a="closeFinal">关闭</button>${lobby.you === 0 ? '<button class="gold" data-a="restart">返回房间再来一局</button>' : ''}</div></div></div>`;
+    <div class="row" style="justify-content:flex-end"><button class="ghost" data-a="closeFinal">关闭</button>${lobby.you === lobby.host ? '<button class="gold" data-a="restart">返回房间再来一局</button>' : ''}</div></div></div>`;
 }
 function renderRules() {
   return `<div class="modal"><div class="box" style="max-width:680px"><h2>规则速查</h2>
@@ -481,6 +490,13 @@ document.addEventListener('click', e => {
     }
     case 'start': return sendRaw({ t: 'start' });
     case 'leave': return sendRaw({ t: 'leave' });
+    case 'leaveGame': {
+      const sc = S.players[S.me].score;
+      const msg = S.phase === 'ended' ? '确定离开房间吗？' : `确定离开游戏吗？\n离开后将以当前的 ${sc} 分作为你的最终成绩，且不能再回到本局。${lobby.you === lobby.host ? '\n房主将由下一位玩家继承。' : ''}`;
+      if (confirm(msg)) sendRaw({ t: 'leave' });
+      return;
+    }
+    case 'closeResult': ui.leftResult = null; break;
     case 'restart': ui.modal = null; return sendRaw({ t: 'restart' });
     case 'rules': ui.showRules = true; break;
     case 'rulesClose': ui.showRules = false; break;
