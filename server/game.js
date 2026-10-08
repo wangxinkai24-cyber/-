@@ -93,8 +93,9 @@ class Game {
     // 准备阶段：从末位玩家开始逆时针选择宾客
     this.setupOrder = this.players.map((p, i) => i).sort((a, b) => this.players[b].tile[0] - this.players[a].tile[0]);
     this.setupIdx = 0;
-    this.turn = { p: this.setupOrder[0] };
     this.waiting = new Set();
+    this.delayed = new Set();
+    this.turn = this.withDeadline({ p: this.setupOrder[0] });
     this.version = 0;
   }
 
@@ -314,6 +315,7 @@ class Game {
     this.rollDice(this.totalDice);
     this.trash = 0;
     this.waiting = new Set();
+    this.delayed = new Set();
     for (const p of this.players) { p.covered = p.left ? [true, true] : [false, false]; for (const e of p.played) e.used = false; }
     this.log(`—— 第 ${this.round} 轮开始，骰子：${[1, 2, 3, 4, 5, 6].map(v => `${v}×${this.dice[v]}`).join(' ')} ——`);
     this.nextTurn();
@@ -323,15 +325,24 @@ class Game {
     if (this.diceLeft() === 0) return this.endRound();
     let best = null, bi = -1;
     this.players.forEach((p, i) => {
-      if (this.waiting.has(i)) return;
+      if (this.waiting.has(i) || this.delayed.has(i)) return;
       const n = this.nextNumber(p); if (n != null && (best == null || n < best)) { best = n; bi = i; }
     });
+    if (bi < 0) {
+      // 超时被延后的玩家：在其他人都行动完之后补做回合（不重投骰子）
+      this.players.forEach((p, i) => {
+        if (!this.delayed.has(i) || this.waiting.has(i)) return;
+        const n = this.nextNumber(p); if (n != null && (best == null || n < best)) { best = n; bi = i; }
+      });
+      if (bi >= 0) { this.delayed.delete(bi); this.log(`${this.players[bi].name} 补做之前超时错过的回合`); }
+    }
     if (bi < 0) {
       // 只剩跳过的玩家：最小数字者重投骰子
       this.players.forEach((p, i) => {
         const n = this.nextNumber(p); if (n != null && (best == null || n < best)) { best = n; bi = i; }
       });
       if (bi < 0) return this.endRound();
+      this.delayed.delete(bi);
       const left = this.diceLeft() - 1;
       this.trash++;
       if (left <= 0) { this.dice = [0, 0, 0, 0, 0, 0, 0]; this.log('最后一颗骰子被移入垃圾桶'); return this.endRound(); }
@@ -339,7 +350,7 @@ class Game {
       this.waiting = new Set();
       this.log(`${this.players[bi].name} 移除1颗骰子并重投剩余 ${left} 颗：${[1, 2, 3, 4, 5, 6].map(v => `${v}×${this.dice[v]}`).join(' ')}`);
     }
-    this.turn = { p: bi, guestTaken: false, dieTaken: false, boostUsed: false, bonus: false, extraTurn: false };
+    this.turn = this.withDeadline({ p: bi, guestTaken: false, dieTaken: false, boostUsed: false, bonus: false, extraTurn: false });
     this.version++;
   }
   endRound() {
@@ -511,12 +522,7 @@ class Game {
     else if (this.phase === 'setupGuests') {
       if (t !== 'takeGuest') fail('请先选择一位起始宾客');
       if (this.turn.p !== pi) fail('还没轮到你选择宾客');
-      const i = msg.i | 0; if (!this.guestRow[i]) fail('无效的宾客');
-      const id = this.takeFromRow(i);
-      p.cafe[p.cafe.indexOf(null)] = { id, filled: [] };
-      this.log(`${p.name} 选择了起始宾客【${GUEST_BY_ID[id].name}】`);
-      this.setupIdx++;
-      this.advanceSetup();
+      this.setupPick(pi, msg.i | 0);
     }
     else if (this.phase === 'play') {
       if (!this.turn || this.turn.p !== pi) fail('还没轮到你');
@@ -547,6 +553,7 @@ class Game {
       }
       case 'takeDie': {
         if (T.dieTaken || T.bonus) fail('本回合已经拿过骰子');
+        if (!this.guestStepDone(p, T)) fail('请先选择一位宾客（第①步）');
         const v = msg.v | 0; if (v < 1 || v > 6 || !this.dice[v]) fail('该行动格没有骰子');
         const boost = !!msg.boost && !T.boostUsed;
         let cost = (boost ? 1 : 0) + (v === 6 && !this.has(p, 17) ? 1 : 0);
@@ -631,7 +638,7 @@ class Game {
         if (p.pending.length) fail('请先完成待处理的步骤');
         if (T.extraTurn) {
           this.log(`${p.name} 获得一个额外回合（埃及法老）`);
-          this.turn = { p: pi, guestTaken: false, dieTaken: false, boostUsed: true, bonus: true, extraTurn: false };
+          this.turn = this.withDeadline({ p: pi, guestTaken: false, dieTaken: false, boostUsed: true, bonus: true, extraTurn: false });
         } else this.nextTurn();
         break;
       }
@@ -703,6 +710,11 @@ class Game {
       }
       case 'rooms': {
         if (msg.done) { done = true; break; }
+        if (Array.isArray(msg.places)) {
+          if (msg.places.length > t.n - t.placed) fail(`最多只能再准备 ${t.n - t.placed} 间`);
+          for (const pl of msg.places) { this.placeRoom(p, pl.r | 0, pl.c | 0, t); t.placed++; }
+          done = true; break;
+        }
         this.placeRoom(p, msg.r | 0, msg.c | 0, t);
         t.placed++;
         if (t.placed >= t.n || !this.anyPlaceable(p, t)) done = true;
@@ -776,6 +788,63 @@ class Game {
   }
   afterPending() { this.checkRoyalDone(); this.checkSetupRoomsDone(); }
 
+  withDeadline(t) {
+    const sec = +this.settings.turnTime || 0;
+    if (sec > 0) t.deadline = Date.now() + sec * 1000;
+    return t;
+  }
+  guestCost(p, i) { return this.has(p, 25) ? 0 : D.GUEST_SLOT_COST[i]; }
+  // 第①步（选宾客）是否已完成：已拿宾客 / 额外回合 / 咖啡厅已满 / 无可负担的宾客
+  guestStepDone(p, T) {
+    if (T.guestTaken || T.bonus || T.dieTaken) return true;
+    if (!p.cafe.includes(null)) return true;
+    return !this.guestRow.some((id, i) => id && this.guestCost(p, i) <= p.money);
+  }
+  setupPick(pi, i) {
+    const p = this.players[pi];
+    if (!this.guestRow[i]) fail('无效的宾客');
+    const id = this.takeFromRow(i);
+    p.cafe[p.cafe.indexOf(null)] = { id, filled: [] };
+    this.log(`${p.name} 选择了起始宾客【${GUEST_BY_ID[id].name}】`);
+    this.setupIdx++;
+    this.advanceSetup();
+  }
+  flushPending(p) {
+    for (const t of p.pending) {
+      if (t.k === 'food') for (const c of t.tokens) p.kitchen[c]++;
+      if (t.k === 'd3p' && t.cards) this.empDeck.push(...t.cards);
+    }
+    p.pending = [];
+  }
+  // 回合超时：由服务器每秒检查调用
+  timeout() {
+    const T = this.turn;
+    if (!T || !T.deadline || Date.now() < T.deadline || this.phase === 'ended') return false;
+    const pi = T.p, p = this.players[pi];
+    if (this.phase === 'setupGuests') {
+      let i = 4; while (i >= 0 && !this.guestRow[i]) i--;
+      this.log(`${p.name} 选择超时，系统自动选择`);
+      this.setupPick(pi, Math.max(0, i));
+    } else if (this.phase === 'play') {
+      this.flushPending(p);
+      if (T.dieTaken || T.bonus) {
+        this.log(`⏱ ${p.name} 回合超时，自动结束回合`);
+        this.nextTurn();
+      } else {
+        const others = this.players.some((q, i) => i !== pi && !q.left && !this.waiting.has(i) && !this.delayed.has(i) && this.nextNumber(q) != null);
+        if (others) {
+          this.delayed.add(pi);
+          this.log(`⏱ ${p.name} 回合超时，此回合延后到其他玩家都行动完之后再进行`);
+        } else {
+          p.covered[p.covered[0] ? 1 : 0] = true;
+          this.log(`⏱ ${p.name} 回合超时，且已是最后行动者，放弃此回合`);
+        }
+        this.nextTurn();
+      }
+    } else return false;
+    this.version++;
+    return true;
+  }
   advanceSetup() {
     while (this.setupIdx < this.n && this.players[this.setupOrder[this.setupIdx]].left) this.setupIdx++;
     if (this.setupIdx >= this.n) {
@@ -784,7 +853,7 @@ class Game {
       for (const q of this.players) if (!q.left) q.pending.push({ k: 'rooms', n: 3, d: 0, placed: 0, setup: true });
       this.log('请所有玩家准备最多3间客房（从左下角开始），完成后点击“完成”');
       this.checkSetupRoomsDone();
-    } else this.turn = { p: this.setupOrder[this.setupIdx] };
+    } else this.turn = this.withDeadline({ p: this.setupOrder[this.setupIdx] });
   }
 
   // 玩家中途离开：以离开时的分数作为最终分数
@@ -796,7 +865,7 @@ class Game {
       p.left = true; p.leftScore = p.score;
       if (p.pending.some(t => t.k === 'd3p' && t.cards)) for (const t of p.pending) if (t.k === 'd3p' && t.cards) this.empDeck.push(...t.cards);
       p.pending = []; p.covered = [true, true];
-      this.waiting.delete(pi);
+      this.waiting.delete(pi); this.delayed.delete(pi);
       this.log(`${p.name} 离开了游戏，最终分数按离开时的 ${p.score} 分计算`);
       if (this.players.every(q => q.left)) { this.log('所有玩家都已离开，游戏立即结算'); this.finishGame(); }
       else if (this.phase === 'setupGuests') { if (this.turn && this.turn.p === pi) this.advanceSetup(); }
@@ -816,7 +885,8 @@ class Game {
       guestRow: this.guestRow, guestDeck: this.guestDeck.length, empDeck: this.empDeck.length,
       dice: this.dice, trash: this.trash, totalDice: this.totalDice,
       politics: this.politics, royalTiles: this.royalTiles,
-      turn: this.turn, waiting: [...this.waiting],
+      turn: this.turn, waiting: [...this.waiting], delayed: [...this.delayed], serverNow: Date.now(),
+      guestStepDone: this.turn && this.phase === 'play' ? this.guestStepDone(this.players[this.turn.p], this.turn) : true,
       setupPicker: this.phase === 'setupGuests' ? this.turn.p : null,
       ranking: this.ranking || null,
       players: this.players.map((p, i) => ({

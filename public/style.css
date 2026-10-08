@@ -189,3 +189,32 @@ input,select{font:inherit;padding:8px 10px;border:1px solid #bba98a;border-radiu
 .small{font-size:12px;color:var(--muted)}
 
 @media (max-width:980px){.prompt{position:static}.top{position:static}}
+
+/* ---------- v3：玩家配色、步骤、计时 ---------- */
+.pc-orange{background:#e8791b}.pc-blue{background:#2f74d0}.pc-pink{background:#d9558f}.pc-green{background:#2f8a4c}
+.prompt{background:var(--pcbg,#fff7dc);border:3px solid var(--pc,#c39a3c);border-left-width:12px;padding:12px 14px;transition:background .3s,border-color .3s}
+.prompt.mine{box-shadow:0 0 0 4px color-mix(in srgb,var(--pc) 35%,transparent),0 8px 22px rgba(0,0,0,.3);animation:glow 1.6s ease-in-out infinite}
+@keyframes glow{50%{box-shadow:0 0 0 7px color-mix(in srgb,var(--pc) 18%,transparent),0 8px 22px rgba(0,0,0,.3)}}
+.phead{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:6px}
+.phead .who{font-family:"Noto Serif SC",serif;font-weight:900;font-size:20px;color:var(--pc);display:flex;align-items:center;gap:8px}
+.phead .who .dot{width:18px;height:18px}
+.prompt .msg{font-size:15px;color:#2b2118;font-weight:700;line-height:1.5}
+.steps{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin:4px 0 8px}
+.step{padding:4px 10px;border-radius:20px;font-weight:700;font-size:13px;background:#fff;border:2px solid #d5c6a5;color:#9a8b70}
+.step.now{background:var(--pc);border-color:var(--pc);color:#fff}
+.step.done{background:#e8f4ea;border-color:#3e9a5a;color:#2f6b50}
+.step.done::after{content:" ✓"}
+.step.skip{text-decoration:line-through;opacity:.6}
+.steps .arr{color:#9a8b70;font-weight:700}
+.timer{margin-left:auto;font-family:"Noto Serif SC",serif;font-weight:900;font-size:18px;background:#fff;border:2px solid var(--pc,#c39a3c);color:#2b2118;border-radius:10px;padding:2px 10px;font-variant-numeric:tabular-nums}
+.top .pill .timer{margin:0;font-size:13px;border:none;background:none;color:inherit;padding:0}
+.timer.urgent,.top .pill .timer.urgent{background:#c62828;color:#fff;border-color:#c62828;animation:blink .5s steps(2) infinite}
+@keyframes blink{50%{opacity:.55}}
+.recent{font-size:12.5px;color:#4b3c2a;background:rgba(255,255,255,.55);border-radius:8px;padding:4px 8px;margin-top:4px;line-height:1.5}
+.aspace.sel{border-color:#ff9f1a;box-shadow:0 0 0 3px #ff9f1a;background:linear-gradient(#fff3d6,#f6dca2)}
+.cell.stg{box-shadow:inset 0 0 0 4px #ff9f1a !important;animation:none}
+.cell.stg .door{opacity:.85;border-style:dashed}
+.cell .cost.staged{background:#ff9f1a}
+.confirmline{background:#fff;border:1.5px solid #c39a3c;border-radius:8px;padding:8px 10px;margin:8px 0;font-size:14px}
+.dieconfirm{margin-top:10px;background:#fff8e6;border:2.5px solid #ff9f1a;border-radius:12px;padding:10px 12px}
+.dieconfirm h4{margin:0 0 6px;font-family:"Noto Serif SC",serif;color:var(--wine);font-size:16px}

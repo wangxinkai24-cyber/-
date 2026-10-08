@@ -202,7 +202,7 @@ const ROYAL_BACK = { 3: 3, 5: 5, 7: 7 };
 const GUEST_SLOT_COST = [3, 2, 1, 0, 0];
 const DICE_BY_PLAYERS = { 2: 10, 3: 12, 4: 14 };
 const TURN_TILES = { 2: [[1, 4], [2, 3]], 3: [[1, 6], [2, 5], [3, 4]], 4: [[1, 8], [2, 7], [3, 6], [4, 5]] };
-const PLAYER_COLORS = ['orange', 'lightblue', 'purple', 'gray'];
+const PLAYER_COLORS = ['orange', 'blue', 'pink', 'green'];
 const MONEY_MAX = 20;
 
 const __GH = {

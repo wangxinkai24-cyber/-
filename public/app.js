@@ -14,7 +14,7 @@ const ACTION_LBL = ['', '点心/蛋糕<br>(蛋糕≤点心)', '葡萄酒/咖啡<
 const PIPS = { 1: [4], 2: [0, 8], 3: [0, 4, 8], 4: [0, 2, 6, 8], 5: [0, 2, 4, 6, 8], 6: [0, 2, 3, 5, 6, 8] };
 
 let ws, session = load(), lobby = null, S = null, connected = false;
-const ui = { view: null, selGuest: null, kSel: null, serve: [], boost: false, modal: null, modalKey: null, retSel: [], showRules: false };
+const ui = { view: null, selGuest: null, kSel: null, serve: [], boost: false, modal: null, modalKey: null, retSel: [], showRules: false, dieSel: null, staged: [], confirmIn: null, confirmFlip: null, clockOffset: 0 };
 
 function load() { try { return JSON.parse(localStorage.getItem('gh_session') || 'null'); } catch { return null; } }
 function save(v) { try { if (v) localStorage.setItem('gh_session', JSON.stringify(v)); else localStorage.removeItem('gh_session'); } catch {} }
@@ -29,6 +29,7 @@ function connect() {
   ws.onmessage = ev => {
     const m = JSON.parse(ev.data);
     if (m.t === 'joined') { session = { code: m.code, token: m.token }; save(session); }
+    else if (m.t === 'replaced') { session = null; save(null); lobby = null; S = null; toast('你已在另一台设备上回到这个座位'); }
     else if (m.t === 'gone') { session = null; save(null); lobby = null; S = null; }
     else if (m.t === 'left') {
       session = null; save(null); lobby = null; S = null;
@@ -46,7 +47,11 @@ function act(msg) { sendRaw({ t: 'act', msg }); }
 function pend(o) { act(Object.assign({ type: 'pend' }, o)); }
 function onState(st) {
   const prevTurn = S && S.turn && S.turn.p;
+  const prevKey = S && S.turn ? S.turn.p + ':' + S.turn.dieTaken + ':' + S.version : '';
   S = st;
+  if (st.serverNow) ui.clockOffset = st.serverNow - Date.now();
+  if (!S.turn || S.turn.p !== S.me || S.turn.dieTaken || S.turn.bonus) ui.dieSel = null;
+  if (ui.dieSel && !S.dice[ui.dieSel.v]) ui.dieSel = null;
   if (ui.view == null || ui.view >= S.players.length) ui.view = S.me;
   const T = S.turn;
   if (!T || T.p !== S.me || prevTurn !== T.p) { ui.selGuest = null; ui.kSel = null; ui.serve = []; }
@@ -54,7 +59,7 @@ function onState(st) {
   const me = S.players[S.me];
   const top = me.pending[0];
   const key = top ? top.k + ':' + JSON.stringify(top) : null;
-  if (key !== ui.modalKey) { ui.modalKey = key; ui.modal = null; ui.retSel = []; }
+  if (key !== ui.modalKey) { ui.modalKey = key; ui.modal = null; ui.retSel = []; ui.staged = []; ui.confirmFlip = null; }
 }
 let toastTimer;
 function toast(s) { const t = document.getElementById('toast'); t.textContent = s; t.style.display = 'block'; clearTimeout(toastTimer); toastTimer = setTimeout(() => t.style.display = 'none', 3200); }
@@ -164,6 +169,9 @@ function renderLobby() {
       <select data-set="side" ${host ? '' : 'disabled'}><option value="moon" ${L.settings.side === 'moon' ? 'selected' : ''}>月亮面（所有人相同，推荐首局）</option><option value="sun" ${L.settings.side === 'sun' ? 'selected' : ''}>太阳面（A/B/C/D 各不相同）</option></select></div>
     <div class="row"><label style="flex:0 0 90px;align-self:center">员工卡</label>
       <select data-set="empVariant" ${host ? '' : 'disabled'}><option value="starter" ${L.settings.empVariant === 'starter' ? 'selected' : ''}>入门变体：推荐组合 A/B/C/D</option><option value="random" ${L.settings.empVariant === 'random' ? 'selected' : ''}>标准：随机发6张</option></select></div>
+    <div class="row"><label style="flex:0 0 90px;align-self:center">回合时间</label>
+      <select data-set="turnTime" ${host ? '' : 'disabled'}>${[[0, '不限时'], [180, '每回合 3 分钟'], [300, '每回合 5 分钟']].map(([v, l]) => `<option value="${v}" ${(+L.settings.turnTime || 0) === v ? 'selected' : ''}>${l}</option>`).join('')}</select></div>
+    ${+L.settings.turnTime ? '<p class="hint">超时未完成：未拿骰子则该回合延后到所有人之后补做（届时骰子更少）；已拿骰子则自动结束回合。</p>' : ''}
     <div class="row">${host ? `<button class="gold" data-a="start" ${L.seats.length < 2 ? 'disabled' : ''}>开始游戏（${L.seats.length}人）</button>` : '<p class="hint" style="text-align:center">等待房主开始游戏…</p>'}</div>
     <div class="row"><button class="ghost" data-a="leave">离开房间</button></div>
   </div></div>`;
@@ -186,7 +194,7 @@ function renderGame() {
   <div class="top">
     <span class="title">奥地利大饭店</span>
     <span class="pill">房间 ${lobby.code}</span>
-    <span class="pill">第 ${S.round} / 7 轮</span>
+    <span class="pill">第 ${S.round} / 7 轮</span>${S.turn && S.turn.deadline ? `<span class="pill">${timerHtml()}</span>` : ''}
     <span class="status ${myTurn || me.pending.length ? 'me' : ''}">${statusText()}</span>
     <span class="pill">💶 ${me.money}</span><span class="pill">👑 ${me.royal}</span><span class="pill">⭐ ${me.score}</span>
     ${connected ? '' : '<span class="pill" style="background:#7d1f2c">重连中…</span>'}
@@ -210,14 +218,43 @@ function renderGame() {
   ${ui.showRules ? renderRules() : ''}`;
 }
 
+const PCOL = { orange: ['#e8791b', '#fde3c8'], blue: ['#2f74d0', '#d8e7fb'], pink: ['#d9558f', '#fbd9e7'], green: ['#2f8a4c', '#d6efdc'] };
+function fmtTime(ms) { const s = Math.max(0, Math.ceil(ms / 1000)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; }
+function timerHtml() {
+  if (!S.turn || !S.turn.deadline) return '';
+  return `<span class="timer" data-timer="${S.turn.deadline}">⏱ ${fmtTime(S.turn.deadline - (Date.now() + ui.clockOffset))}</span>`;
+}
+// 当前行动者（用于提示框配色）
+function actorIndex() {
+  if (S.phase === 'setupGuests') return S.setupPicker;
+  if (S.phase === 'play' && S.turn) return S.turn.p;
+  return S.me;
+}
+function stagedCost(me, t) {
+  let money = me.money, rooms = me.rooms.map(r => r.slice()), total = 0;
+  for (const st of ui.staged) { const k = roomCost(Object.assign({}, me, { rooms }), st.r, st.c, t.d); total += k; rooms[st.r][st.c] = { s: 'ready' }; }
+  return total;
+}
 function renderPrompt() {
   const me = S.players[S.me], t = me.pending[0], T = S.turn;
   const myTurn = S.phase === 'play' && T && T.p === S.me;
-  let msg = '', btns = '';
-  if (S.phase === 'ended') { msg = '游戏结束！'; btns = `<button class="gold" data-a="final">查看最终计分</button>${lobby.you === lobby.host ? '<button class="ghost" data-a="restart">返回房间再来一局</button>' : ''}`; }
+  const ai = actorIndex(), actor = S.players[ai];
+  const [pc, pcbg] = PCOL[actor.color] || PCOL.orange;
+  const mine = (myTurn || t || (S.phase === 'setupGuests' && S.setupPicker === S.me)) && S.phase !== 'ended';
+  let head = '', msg = '', btns = '', steps = '';
+  if (S.phase === 'ended') { head = '🏁 游戏结束'; btns = `<button class="gold" data-a="final">查看最终计分</button>${lobby.you === lobby.host ? '<button class="ghost" data-a="restart">返回房间再来一局</button>' : ''}`; }
   else if (t) {
+    head = S.phase === 'royal' ? '👑 皇室计分：轮到你处理' : S.phase === 'setupRooms' ? '🏨 准备阶段：请准备客房' : '🔔 轮到你了！';
     switch (t.k) {
-      case 'rooms': msg = (t.label || (t.setup ? '准备阶段' : '准备客房')) + `：点击酒店中闪烁的格子放置客房（已放 ${t.placed}/${t.n}${t.occupy ? '，放置后立即入住' : ''}${t.maxFloor != null ? `，仅限1-${t.maxFloor + 1}层` : ''}）`; btns = `<button data-p="done">${t.placed ? '完成' : '不放置 / 完成'}</button>`; break;
+      case 'rooms': {
+        const left = t.n - t.placed;
+        const cost = stagedCost(me, t);
+        msg = (t.label || (t.setup ? '准备最多3间客房' : '准备客房')) + `：点击闪烁的格子选择位置（可选 ${ui.staged.length}/${left} 间${t.occupy ? '，建好后立即入住' : ''}${t.maxFloor != null ? `，仅限1-${t.maxFloor + 1}层` : ''}），再点“确认建造”。再次点击已选格子可取消。`;
+        btns = `<button class="gold" data-a="buildOk" ${ui.staged.length ? '' : 'disabled'}>✔ 确认建造 ${ui.staged.length} 间（${cost ? '-' + cost + '克朗' : '免费'}）</button>`
+          + (ui.staged.length ? '<button class="ghost" data-a="buildReset">重新选择</button>' : '')
+          + `<button class="ghost" data-p="done">${t.placed ? '完成' : '不建造'}</button>`;
+        break;
+      }
       case 'flip': msg = `点击一间“空闲”客房，将其翻为已入住（${t.done}/${t.n}）`; btns = '<button class="ghost" data-p="skip">跳过</button>'; break;
       case 'play': msg = (t.label || `打出1张员工（${t.d >= G.FREE ? '免费' : t.d ? '减' + t.d + '克朗' : '付全价'}）`) + '：点击下方手牌'; btns = '<button class="ghost" data-p="skip">不打出</button>'; break;
       case 'guest': msg = '免费拿取1位宾客：点击上方宾客牌'; btns = '<button class="ghost" data-p="skip">放弃</button>'; break;
@@ -227,25 +264,39 @@ function renderPrompt() {
       default: msg = '请在弹出的窗口中完成选择'; btns = '<button data-a="reopen">打开窗口</button>';
     }
   } else if (S.phase === 'setupGuests') {
-    msg = S.setupPicker === S.me ? '准备阶段：点击上方一位宾客，免费放入你的咖啡厅' : `等待 ${S.players[S.setupPicker].name} 选择起始宾客…`;
+    if (S.setupPicker === S.me) { head = '🔔 轮到你了！'; msg = '准备阶段：点击上方一位宾客，免费放入你的咖啡厅'; }
+    else { head = `⏳ 轮到 ${esc(actor.name)}`; msg = `${esc(actor.name)} 正在选择起始宾客…`; }
   } else if (S.phase === 'setupRooms' || S.phase === 'royal') {
-    msg = '等待其他玩家…';
+    head = '⏳ 等待其他玩家'; msg = S.phase === 'royal' ? '其他玩家正在处理皇室奖励/惩罚…' : '其他玩家正在准备客房…';
   } else if (myTurn) {
-    const steps = [];
-    if (!T.dieTaken && !T.bonus) steps.push(T.guestTaken ? '已拿宾客 ✓' : '① 可选：点击宾客牌拿取宾客', '② 必须：点击一个行动格拿取骰子');
-    else steps.push(T.bonus ? '额外回合：可拿宾客及执行额外行动' : '已拿骰子 ✓');
-    steps.push('额外行动：点击厨房餐点→宾客上菜；点击“可入住”宾客→空闲客房入住');
-    msg = steps.join('　');
-    if (!T.dieTaken && !T.bonus) btns += `<label><input type="checkbox" data-a="boost" ${ui.boost ? 'checked' : ''} ${T.boostUsed || me.money < 1 ? 'disabled' : ''}> 付1克朗，骰子数量+1</label>`;
+    head = T.bonus ? '🔔 你的额外回合（埃及法老）' : '🔔 轮到你了！';
+    const gDone = S.guestStepDone, full = !me.cafe.includes(null);
+    const st = (n, label, state) => `<span class="step ${state}">${n} ${label}</span>`;
+    const s1 = T.bonus ? 'skip' : T.guestTaken ? 'done' : gDone ? 'skip' : 'now';
+    const s2 = T.dieTaken ? 'done' : T.bonus ? 'skip' : gDone ? 'now' : 'wait';
+    const s3 = (T.dieTaken || T.bonus) ? 'now' : 'wait';
+    steps = `<div class="steps">${st('①', '选宾客', s1)}<span class="arr">→</span>${st('②', '选骰子行动', s2)}<span class="arr">→</span>${st('③', '额外行动 / 结束回合', s3)}</div>`;
+    if (!T.dieTaken && !T.bonus && !gDone) msg = '第①步：请点击上方一位宾客放入咖啡厅（必选，费用见牌下方）';
+    else if (!T.dieTaken && !T.bonus) msg = (T.guestTaken ? '' : full ? '咖啡厅已满，本回合跳过选宾客（也可以先让宾客入住腾出空位再选）。' : '没有负担得起的宾客，跳过选宾客。') + '第②步：点击一个行动格选择骰子，确认后执行行动';
+    else msg = '第③步：可以上菜（点厨房餐点→宾客）、让宾客入住（点“可入住”宾客→空闲客房）、领取政务卡、使用员工，完成后点“结束回合”';
     if (ui.serve.length) btns += `<button class="gold" data-a="serveOk">确认上菜 ${ui.serve.length} 个（${has(me, 24) ? '免费' : '-1克朗'}）</button><button class="ghost" data-a="serveCancel">取消上菜</button>`;
     else if (ui.kSel) btns += `<span class="small">已选 ${FN[ui.kSel]}，点击需要它的宾客</span><button class="ghost" data-a="serveCancel">取消</button>`;
-    if (ui.selGuest != null) btns += `<span class="small">已选宾客，点击一间空闲客房入住</span><button class="ghost" data-a="unselGuest">取消</button>`;
+    if (ui.selGuest != null) btns += `<span class="small">已选宾客，点击一间闪烁的空闲客房入住</span><button class="ghost" data-a="unselGuest">取消</button>`;
     if (!T.dieTaken && !T.guestTaken && !T.bonus) btns += '<button class="ghost" data-a="skip">跳过回合（等待重投）</button>';
     if (T.dieTaken || T.bonus) btns += '<button class="wine" data-a="endTurn">结束回合</button>';
   } else if (S.phase === 'play') {
-    msg = `等待 ${S.players[T.p].name} 行动…`;
+    head = `⏳ 轮到 ${esc(actor.name)}`;
+    msg = `${esc(actor.name)} 正在行动${S.delayed && S.delayed.includes(S.me) ? '（你上回合超时，将在所有人之后补做回合）' : ''}`;
   }
-  return `<div class="prompt"><div class="msg">${msg}</div>${btns ? `<div class="btns">${btns}</div>` : ''}</div>`;
+  // 观战时显示当前行动者最近的动作
+  let recent = '';
+  if (!mine && S.phase !== 'ended') {
+    const ls = S.log.slice(-3).reverse().map(l => `<div>· ${esc(l.s)}</div>`).join('');
+    recent = `<div class="recent">${ls}</div>`;
+  }
+  return `<div class="prompt ${mine ? 'mine' : ''}" style="--pc:${pc};--pcbg:${pcbg}">
+    <div class="phead"><span class="who">${dot(actor.color)} ${head}</span>${timerHtml()}</div>
+    ${steps}${msg ? `<div class="msg">${msg}</div>` : ''}${recent}${btns ? `<div class="btns">${btns}</div>` : ''}</div>`;
 }
 
 function renderBoardGuests() {
@@ -261,15 +312,31 @@ function renderBoardGuests() {
     <div class="cards">${S.guestRow.map((id, i) => guestCard(id, { cost: S.phase === 'play' ? G.GUEST_SLOT_COST[i] : null, click: canTake(i), attrs: canTake(i) ? `data-a="takeGuest" data-i="${i}"` : '' })).join('')}</div></div>`;
 }
 
+function dieConfirm(me) {
+  if (!(ui.dieSel && S.turn && S.turn.p === S.me)) return '';
+  {
+    const v = ui.dieSel.v, T = S.turn;
+    const base = S.dice[v] + (v === 6 && has(me, 17) ? 1 : 0);
+    const n = base + (ui.dieSel.boost ? 1 : 0);
+    const cost = (v === 6 && !has(me, 17) ? 1 : 0) + (ui.dieSel.boost ? 1 : 0);
+    const canBoost = !T.boostUsed && me.money >= 1 + (v === 6 && !has(me, 17) ? 1 : 0);
+    const desc = { 1: `拿取最多 ${n} 个点心/蛋糕`, 2: `拿取最多 ${n} 个葡萄酒/咖啡`, 3: `准备最多 ${n} 间客房`, 4: `皇室/资金共推进 ${n} 格`, 5: `打出1张员工，减费 ${n} 克朗`, 6: `付1克朗，以强度 ${n} 执行行动1-5中的一个` }[v];
+    return `<div class="dieconfirm"><h4>确认选择骰子</h4><div class="row" style="gap:14px">${dieFace(v)}<div><b style="font-size:16px">行动 ${v}：${ACTION_LBL[v].replace(/<br>/g, ' ')}</b><div class="small">该格有 ${S.dice[v]} 颗骰子${v === 6 && has(me, 17) ? '（厨工+1）' : ''}</div></div></div>
+      <label class="row" style="font-weight:600"><input type="checkbox" data-a="dieBoost" ${ui.dieSel.boost ? 'checked' : ''} ${canBoost ? '' : 'disabled'}> 额外支付1克朗，骰子数量 +1${T.boostUsed ? '（本回合已用过）' : canBoost ? '' : '（克朗不足）'}</label>
+      <div class="confirmline">本次行动：<b>${desc}</b>${cost ? `　花费 <b>${cost}</b> 克朗` : ''}</div>
+      <p class="small">选错了可以点“更改骰子”，或直接点击上方其他行动格重新选择。</p><div class="row" style="justify-content:flex-end"><button class="ghost" data-a="dieCancel">更改骰子</button><button class="gold" data-a="dieOk">✔ 确认</button></div></div>`;
+  }
+}
+
 function renderActions() {
   const me = S.players[S.me], T = S.turn;
-  const can = S.phase === 'play' && T && T.p === S.me && !T.dieTaken && !T.bonus && !me.pending.length;
+  const can = S.phase === 'play' && T && T.p === S.me && !T.dieTaken && !T.bonus && !me.pending.length && S.guestStepDone;
   return `<div class="panel"><h3>行动版图 <span class="r">剩余骰子 ${S.dice.reduce((a, b) => a + b, 0)} · 垃圾桶 ${S.trash}</span></h3>
     <div class="actions">${[1, 2, 3, 4, 5, 6].map(v => {
       const n = S.dice[v]; const ok = can && n > 0;
-      return `<div class="aspace ${ok ? 'click' : ''} ${n ? '' : 'empty'}" ${ok ? `data-a="die" data-v="${v}"` : ''}>
+      return `<div class="aspace ${ok ? 'click' : ''} ${n ? '' : 'empty'} ${ui.dieSel && ui.dieSel.v === v ? 'sel' : ''}" ${ok ? `data-a="die" data-v="${v}"` : ''}>
         ${dieFace(v)}<div class="lbl">${ACTION_LBL[v]}</div><div class="cnt">×${n}</div></div>`;
-    }).join('')}</div></div>`;
+    }).join('')}</div>${dieConfirm(me)}</div>`;
 }
 
 function renderPlayers() {
@@ -282,7 +349,7 @@ function renderPlayers() {
   return `<div class="panel"><h3>玩家 <span class="r">点击玩家查看其酒店</span></h3><div class="plist">
     ${order.map(i => { const p = S.players[i]; const on = !p.left && (S.connected ? S.connected[i] : true);
       return `<div class="prow ${T && T.p === i ? 'active' : ''} ${ui.view === i ? 'viewing' : ''} ${on ? '' : 'off'}" data-a="view" data-i="${i}">
-        ${dot(p.color)}<span class="nm">${esc(p.name)}${i === S.me ? '（你）' : ''}${S.waiting.includes(i) ? ' ⏸' : ''}${p.left ? '（已离开）' : ''}${lobby.host === i ? ' 👑房主' : ''}</span>
+        ${dot(p.color)}<span class="nm">${esc(p.name)}${i === S.me ? '（你）' : ''}${S.waiting.includes(i) ? ' ⏸' : ''}${S.delayed && S.delayed.includes(i) ? ' ⏱延后' : ''}${p.left ? '（已离开）' : ''}${lobby.host === i ? ' 👑房主' : ''}</span>
         <span class="tiles">${p.tile.map((n, k) => `<span class="${p.covered[k] ? 'cv' : ''}">${n}</span>`).join('')}</span>
         <span class="st">⭐<b>${p.score}</b></span><span class="st">💶<b>${p.money}</b></span><span class="st">👑<b>${p.royal}</b> 🂠${p.handCount}</span></div>`; }).join('')}
   </div>
@@ -310,6 +377,11 @@ function renderPolRoyal() {
     <h3 style="margin-top:10px">皇室板块</h3><div class="chips">${roy}</div></div>`;
 }
 
+function virtualRooms(p, t) {
+  const rooms = p.rooms.map(r => r.slice()); let money = p.money;
+  for (const st of ui.staged) { money -= roomCost(Object.assign({}, p, { rooms }), st.r, st.c, t.d); rooms[st.r][st.c] = { s: 'ready' }; }
+  return Object.assign({}, p, { rooms, money });
+}
 function renderMyArea() {
   const vi = ui.view, p = S.players[vi], me = S.players[S.me], isMe = vi === S.me;
   const T = S.turn, t = me.pending[0];
@@ -328,13 +400,18 @@ function renderMyArea() {
       if (c === 0 || p.zoneOf[r][c - 1] !== z) zc.push('zl');
       if (c === 4 || p.zoneOf[r][c + 1] !== z) zc.push('zr');
       let can = false, costTag = '';
-      if (isMe && t && t.k === 'rooms' && canPlace(p, r, c, t)) { const k = roomCost(p, r, c, t.d); if (k <= p.money) { can = true; costTag = `<span class="cost">${k ? '-' + k : '免费'}</span>`; } }
+      const stIdx = isMe && t && t.k === 'rooms' ? ui.staged.findIndex(x => x.r === r && x.c === c) : -1;
+      if (stIdx >= 0) { can = true; costTag = `<span class="cost staged">待建 ${stIdx + 1}</span>`; }
+      else if (isMe && t && t.k === 'rooms' && ui.staged.length < t.n - t.placed) {
+        const vp = virtualRooms(p, t);
+        if (canPlace(vp, r, c, t)) { const k = roomCost(vp, r, c, t.d); if (k <= vp.money) { can = true; costTag = `<span class="cost">${k ? '-' + k : '免费'}</span>`; } }
+      }
       if (isMe && t && t.k === 'flip' && room && room.s === 'ready') can = true;
       if (isMe && freeTurn && ui.selGuest != null && room && room.s === 'ready') {
         const g = GUEST[p.cafe[ui.selGuest].id]; if (g.color === 'green' || g.color === col) can = true;
       }
       const pt = G.ROOM_PTS[`${r}-${c}`];
-      cells += `<div class="cell ${col} ${room ? room.s : ''} ${zc.join(' ')} ${zdone.has(z) ? 'zdone' : ''} ${can ? 'can' : ''}" ${can ? `data-a="cell" data-r="${r}" data-c="${c}"` : ''} title="${r + 1}${String(c + 1).padStart(2, '0')}">
+      cells += `<div class="cell ${col} ${room ? room.s : ''} ${stIdx >= 0 ? 'stg' : ''} ${zc.join(' ')} ${zdone.has(z) ? 'zdone' : ''} ${can ? 'can' : ''}" ${can ? `data-a="cell" data-r="${r}" data-c="${c}"` : ''} title="${r + 1}${String(c + 1).padStart(2, '0')}">
         <div class="door"></div>${pt ? `<span class="pt">${pt}</span>` : ''}${costTag}</div>`;
     }
   }
@@ -399,6 +476,17 @@ function renderMyArea() {
 function renderModal() {
   if (S.phase === 'ended' && ui.modal !== 'closedFinal') return renderFinal();
   const me = S.players[S.me], t = me.pending[0];
+  const box0 = (title, body, foot) => `<div class="modal"><div class="box">${title ? `<h2>${title}</h2>` : ''}${body}<div class="row" style="justify-content:flex-end">${foot}</div></div></div>`;
+  if (ui.confirmIn) {
+    const { slot, r, c } = ui.confirmIn, g = GUEST[me.cafe[slot].id];
+    const bonus = g.fx.length ? g.fx.map(fxText).join('，') : '无';
+    return box0('确认入住', `<p>让 <b>${esc(g.name)}</b> 入住客房 <b>${r + 1}${String(c + 1).padStart(2, '0')}</b>？</p><p>获得 <b>${g.pts}</b> 分，奖励：${bonus}</p>`,
+      '<button class="ghost" data-a="inCancel">换一间</button><button class="gold" data-a="inOk">✔ 确认入住</button>');
+  }
+  if (ui.confirmFlip && t && t.k === 'flip') {
+    const { r, c } = ui.confirmFlip;
+    return box0('确认翻转客房', `<p>将客房 <b>${r + 1}${String(c + 1).padStart(2, '0')}</b> 翻为已入住？</p>`, '<button class="ghost" data-a="flipCancel">换一间</button><button class="gold" data-a="flipOk">✔ 确认</button>');
+  }
   if (!t || ui.modal === 'hidden') return '';
   const M = ui.modal || (ui.modal = initModal(t, me));
   if (!M) return '';
@@ -470,7 +558,7 @@ document.addEventListener('change', e => {
   const el = e.target;
   if (el.dataset.set) sendRaw({ t: 'settings', [el.dataset.set]: el.value });
   if (el.dataset.fa != null && ui.modal) ui.modal.assign[+el.dataset.fa] = +el.value;
-  if (el.dataset.a === 'boost') { ui.boost = el.checked; }
+  if (el.dataset.a === 'dieBoost' && ui.dieSel) { ui.dieSel.boost = el.checked; render(); }
 });
 document.addEventListener('click', e => {
   const el = e.target.closest('[data-a],[data-p]');
@@ -510,7 +598,15 @@ document.addEventListener('click', e => {
       if (t && t.k === 'guest') pend({ i: +d.i }); else act({ type: 'takeGuest', i: +d.i });
       return;
     }
-    case 'die': act({ type: 'takeDie', v: +d.v, boost: ui.boost }); ui.boost = false; return;
+    case 'die': ui.dieSel = { v: +d.v, boost: false }; break;
+    case 'dieCancel': ui.dieSel = null; break;
+    case 'dieOk': { const sel = ui.dieSel; ui.dieSel = null; if (sel) act({ type: 'takeDie', v: sel.v, boost: sel.boost }); return; }
+    case 'inCancel': ui.confirmIn = null; break;
+    case 'inOk': { const ci = ui.confirmIn; ui.confirmIn = null; ui.selGuest = null; act({ type: 'checkin', slot: ci.slot, r: ci.r, c: ci.c }); return; }
+    case 'flipCancel': ui.confirmFlip = null; break;
+    case 'flipOk': { const f = ui.confirmFlip; ui.confirmFlip = null; pend({ r: f.r, c: f.c }); return; }
+    case 'buildOk': { const pl = ui.staged.slice(); ui.staged = []; pend({ places: pl }); return; }
+    case 'buildReset': ui.staged = []; break;
     case 'skip': if (confirm('确定跳过这个回合吗？你需要等其他玩家都行动完。')) act({ type: 'skip' }); return;
     case 'endTurn': {
       const anyOk = me.cafe.some(g => g && g.ok) && me.rooms.some(r => r.some(x => x && x.s === 'ready'));
@@ -521,9 +617,13 @@ document.addEventListener('click', e => {
     }
     case 'cell': {
       const r = +d.r, c = +d.c, t = me.pending[0];
-      if (t && (t.k === 'rooms' || t.k === 'flip')) pend({ r, c });
-      else if (ui.selGuest != null) { act({ type: 'checkin', slot: ui.selGuest, r, c }); ui.selGuest = null; }
-      return;
+      if (t && t.k === 'rooms') {
+        const i = ui.staged.findIndex(x => x.r === r && x.c === c);
+        if (i >= 0) ui.staged.splice(i); // 取消该格及之后选择的格子
+        else ui.staged.push({ r, c });
+      } else if (t && t.k === 'flip') ui.confirmFlip = { r, c };
+      else if (ui.selGuest != null) ui.confirmIn = { slot: ui.selGuest, r, c };
+      break;
     }
     case 'selGuest': ui.selGuest = ui.selGuest === +d.s ? null : +d.s; ui.kSel = null; break;
     case 'unselGuest': ui.selGuest = null; break;
@@ -579,6 +679,13 @@ document.addEventListener('click', e => {
 document.addEventListener('keydown', e => { if (e.key === 'Enter' && !lobby && document.activeElement && document.activeElement.id === 'code') document.querySelector('[data-a="join"]').click(); });
 
 // ---------------- 启动 ----------------
+setInterval(() => {
+  document.querySelectorAll('[data-timer]').forEach(el => {
+    const ms = +el.dataset.timer - (Date.now() + ui.clockOffset);
+    el.textContent = '⏱ ' + fmtTime(ms);
+    el.classList.toggle('urgent', ms <= 10000);
+  });
+}, 250);
 render();
 connect();
 })();

@@ -35,6 +35,7 @@ function playGame(n, side) {
   while (g.phase !== 'ended') {
     if (++steps > 20000) throw new Error('stuck in phase ' + g.phase + ' ' + JSON.stringify(g.turn));
     if (Math.random() < 0.003) { const alive = g.players.map((q, i) => i).filter(i => !g.players[i].left); g.leave(R(alive)); if (g.phase === 'ended') break; continue; }
+    if (Math.random() < 0.02 && g.turn && (g.phase === 'play' || g.phase === 'setupGuests')) { g.turn.deadline = 1; g.timeout(); if (g.phase === 'ended') break; continue; }
     // 任何有待处理步骤的玩家
     let acted = false;
     for (let i = 0; i < n; i++) {

@@ -67,14 +67,23 @@ wss.on('connection', ws => {
 function onMessage(ws, m) {
   const name = String(m.name || '').trim().slice(0, 12) || '玩家';
   if (m.t === 'create') {
-    const room = { code: newCode(), host: 0, seats: [], settings: { side: 'moon', empVariant: 'starter' }, game: null, touched: Date.now() };
+    const room = { code: newCode(), host: 0, seats: [], settings: { side: 'moon', empVariant: 'starter', turnTime: 0 }, game: null, touched: Date.now() };
     rooms.set(room.code, room);
     return seat(ws, room, name);
   }
   if (m.t === 'join') {
     const room = rooms.get(String(m.code || '').toUpperCase().trim());
     if (!room) return send(ws, { t: 'err', msg: '找不到这个房间号' });
-    if (room.game) return send(ws, { t: 'err', msg: '游戏已经开始，无法加入（掉线玩家会自动重连）' });
+    // 同名玩家 = 换设备回到原来的座位
+    const same = room.seats.findIndex(s => !s.left && s.name.toLowerCase() === name.toLowerCase());
+    if (same >= 0) {
+      const st = room.seats[same];
+      if (st.ws && st.ws !== ws) { send(st.ws, { t: 'replaced' }); st.ws.room = null; }
+      st.ws = ws; ws.room = room; ws.seat = same;
+      send(ws, { t: 'joined', code: room.code, token: st.token, seat: same });
+      return broadcast(room);
+    }
+    if (room.game) return send(ws, { t: 'err', msg: '游戏已经开始，无法加入新玩家。如果你是本局玩家，请输入原来的名字回到座位' });
     if (room.seats.length >= 4) return send(ws, { t: 'err', msg: '房间已满（最多4人）' });
     return seat(ws, room, name);
   }
@@ -93,6 +102,7 @@ function onMessage(ws, m) {
     if (si !== room.host || room.game) return;
     if (['moon', 'sun'].includes(m.side)) room.settings.side = m.side;
     if (['starter', 'random'].includes(m.empVariant)) room.settings.empVariant = m.empVariant;
+    if (m.turnTime != null && [0, 180, 300].includes(+m.turnTime)) room.settings.turnTime = +m.turnTime;
     return broadcast(room);
   }
   if (m.t === 'leave') {
@@ -156,6 +166,14 @@ function seat(ws, room, name) {
 }
 
 // 心跳与清理闲置房间（12小时）
+// 回合计时：每秒检查一次超时
+setInterval(() => {
+  for (const r of rooms.values()) {
+    if (!r.game) continue;
+    try { if (r.game.timeout()) broadcast(r); } catch (e) { console.error('timeout error', e); }
+  }
+}, 1000);
+
 setInterval(() => {
   wss.clients.forEach(ws => { if (!ws.isAlive) return ws.terminate(); ws.isAlive = false; ws.ping(); });
   const now = Date.now();
